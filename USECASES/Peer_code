@@ -1,0 +1,145 @@
+from langgraph.graph import StateGraph, START, END
+from typing_extensions import TypedDict
+import os
+from streamlit_ace import st_ace
+from langchain_groq import ChatGroq
+
+st.set_page_config(page_title="Your App Title", layout="wide")
+
+
+
+groq_api_key=os.getenv("GROQ_API_KEY")
+groq_llm=ChatGroq(groq_api_key=groq_api_key,model_name="qwen-2.5-32b")
+# ---------------------------------------------------------------------
+# 1. Define the state class using TypedDict
+# ---------------------------------------------------------------------
+class CodeReviewState(TypedDict):
+    code_content: str
+    review_outcome: str
+    previous_code: str
+
+class LLMReview:
+    def analyze(self, code_content: str) -> str:
+        prompt = (
+            f"Analyze the following Python code:\n\n"
+            f"{code_content}\n\n"
+            "Respond with 'Approved' if the code is correct or 'NeedsRevision' if it needs changes."
+        )
+        response = groq_llm.invoke(prompt)
+        print(response.content.strip())
+        return response.content.strip()
+
+class LLMPropose:
+    def propose(self, code_content: str) -> str:
+        prompt = (
+            f"Review the following Python code:\n\n"
+            f"{code_content}\n\n"
+            "Provide an improved version with necessary changes to fix or enhance it."
+        )
+        response = groq_llm.invoke(prompt)
+        return response.content.strip()
+
+class LLMSimilarExamples:
+    def generate_examples(self, code_content: str) -> str:
+        prompt = (
+            f"I just learned this Python code:\n\n"
+            f"{code_content}\n\n"
+            "Provide examples of Python code at a similar level of expertise. Include examples with similar structures and new ones to encourage learning, and explain their use cases."
+        )
+        response = groq_llm.invoke(prompt)
+        return response.content.strip()
+
+llm_review = LLMReview()
+llm_propose = LLMPropose()
+llm_examples = LLMSimilarExamples()
+
+def code_review_node(state: CodeReviewState) -> CodeReviewState:
+    if state.get("previous_code", "") == state["code_content"]:
+        state["review_outcome"] = "NeedsRevision"
+    else:
+        outcome = llm_review.analyze(state["code_content"])
+        state["review_outcome"] = outcome
+    return state
+
+def propose_changes_node(state: CodeReviewState) -> CodeReviewState:
+    revised_code = llm_propose.propose(state["code_content"])
+    st.write(f"[propose_changes] Revised code:\n{revised_code}")
+    st.error("Your code needs revision. Please update your code based on the proposed feedback and resubmit.")
+    return state
+
+def stop_node(state: CodeReviewState) -> CodeReviewState:
+    st.success("Wait while examples are loaded...")
+    return state
+
+def manager_node(state: CodeReviewState) -> CodeReviewState:
+    st.write("[sent_to_manager] Your code has been sent to the manager, CONGRATULATIONS!")
+    return state
+
+workflow = StateGraph(CodeReviewState)
+workflow.add_node("code_review", code_review_node)
+workflow.add_node("propose_changes", propose_changes_node)
+workflow.add_node("stop", stop_node)
+workflow.add_node("manager", manager_node)
+
+workflow.add_edge(START, "code_review")
+workflow.add_conditional_edges(
+    "code_review",
+    lambda s: s["review_outcome"].splitlines()[0].strip(),
+    {
+        "Approved": "manager",
+        "NeedsRevision": "propose_changes",
+        "NoChange": "stop"
+    }
+)
+workflow.add_edge("propose_changes", "stop")
+workflow.add_edge("manager", END)
+
+chain = workflow.compile()
+
+st.title("Code Peer Review with AI-powered Suggestions")
+
+if "code" not in st.session_state:
+    st.session_state["code"] = "def foo():\n    return 42"
+if "previous_code" not in st.session_state:
+    st.session_state["previous_code"] = ""
+if "reviewed_code" not in st.session_state:
+    st.session_state["reviewed_code"] = ""
+if "examples" not in st.session_state:
+    st.session_state["examples"] = ""
+if "review_expanded" not in st.session_state:
+    st.session_state["review_expanded"] = False
+if "examples_expanded" not in st.session_state:
+    st.session_state["examples_expanded"] = False
+
+code_input = st_ace(
+    language="python",
+    theme="monokai",
+    auto_update=True,
+    key="ace-editor",
+    height=200
+)
+
+if st.button("Submit for Review & examples!"):
+    if not code_input or not code_input.strip():
+        st.error("Please enter some code.")
+    else:
+        final_state = chain.invoke({'code_content': code_input})
+        st.session_state["reviewed_code"] = final_state["code_content"]
+        st.session_state["code"] = final_state["code_content"]
+        st.session_state["previous_code"] = final_state.get("previous_code", st.session_state.get("previous_code", ""))
+        st.session_state["review_expanded"] = True
+        st.session_state["examples_expanded"] = False
+        if final_state["review_outcome"] == "Approved":
+            st.success("Your code has been approved!")
+        
+
+examples_text = llm_examples.generate_examples(st.session_state["reviewed_code"])
+st.session_state["examples"] = examples_text
+st.session_state["review_expanded"] = False
+st.session_state["examples_expanded"] = True
+
+if st.session_state["examples"]:
+    with st.expander("HERE WE GO!", expanded=st.session_state["examples_expanded"]):
+        st.write(st.session_state["examples"], language="python")
+
+
